@@ -1,0 +1,604 @@
+# Step 1: Install Unsloth (latest) and xformers
+!pip install unsloth
+!pip uninstall unsloth -y && pip install --upgrade --no-cache-dir --no-deps git+https://github.com/unslothai/unsloth.git
+
+
+#
+#
+#
+
+
+
+
+# Step 2: Install other libraries
+!pip install datasets ollama-haystack gradio
+!pip install langchain langchain-community PyPDF2 faiss-cpu
+!pip install pypdf
+# !pip install transformers==4.49.0
+
+
+
+
+#
+#
+#
+
+
+
+
+
+from datasets import load_dataset
+from haystack import Document, Pipeline
+from haystack.document_stores.in_memory import InMemoryDocumentStore
+from haystack.document_stores.types import DuplicatePolicy
+from haystack.components.builders import PromptBuilder
+#from haystack.components.embedders import HuggingFaceAPIDocumentEmbedder
+#from haystack.components.generators import HuggingFaceAPIGenerator
+from haystack.components.retrievers import InMemoryEmbeddingRetriever
+from haystack.components.joiners import DocumentJoiner
+import re
+import gradio as gr
+import json, uuid
+from haystack.utils import Secret
+from haystack.utils.device import ComponentDevice
+
+
+from unsloth import FastLanguageModel
+from haystack.components.embedders import SentenceTransformersDocumentEmbedder  # Embedder local
+from haystack.components.generators import HuggingFaceLocalGenerator  # Generador local
+from haystack import component
+from typing import List, Dict, Any
+import torch
+
+# PDFs
+from PyPDF2 import PdfReader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+@component
+class UnslothGenerator:
+    def __init__(self, model, tokenizer, max_new_tokens=1024, temperature=0.3):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+
+    @component.output_types(replies=List[str])
+    def run(self, prompt: str) -> Dict[str, List[str]]:
+        try:
+            inputs = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=8192
+            ).to("cuda")
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    temperature=self.temperature,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
+            
+            response = self.tokenizer.decode(
+                outputs[0][inputs["input_ids"].shape[1]:],
+                skip_special_tokens=True
+            )
+            
+            return {"replies": [response]}
+            
+        except Exception as e:
+            return {"replies": [f"Error: {str(e)}"]}
+
+
+
+#
+#
+#
+
+
+
+
+document_embedder = SentenceTransformersDocumentEmbedder(
+    model="intfloat/multilingual-e5-large",
+    #device = device,
+    batch_size=4,
+    normalize_embeddings=True
+)
+
+document_embedder.warm_up()
+
+
+def preprocess_pdf(file_path, chunk_size=1000, chunk_overlap=200, separator=["\n\n","\n","."], metadata=None):
+    try:
+        reader = PdfReader(file_path)
+        text = ""
+        meta = file_path
+
+        for idx, page in enumerate(reader.pages, start=1):
+            page_text = page.extract_text()
+            if page_text:
+                # Limpieza básica
+                cleaned_text = re.sub(r'\s+', ' ', page_text)  # Espacios múltiples
+                cleaned_text = re.sub(r'\n+', ' ', cleaned_text)  # Saltos de línea
+                text += cleaned_text + " "
+            else:
+                print(f"Advertencia: Página {idx} parece vacía o con imagen")
+
+        if not text:
+            print("Error: PDF no contiene texto extraíble")
+            return []
+
+        # División en chunks naturales
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=separator
+        )
+        
+        chunks = splitter.split_text(text)
+        
+        # Establecer Metadata
+        if metadata is not None:
+           meta = metadata
+        
+        # Formatear para E5 y Haystack
+        return [
+            Document(
+                content=f"passage: {chunk.strip()}",
+                meta={"source": meta}
+            ) for chunk in chunks if chunk.strip()
+        ]
+
+    except Exception as e:
+        print(f"Error procesando {file_path}: {str(e)}")
+        return []
+
+# Procesar PDFs
+def preprocess_and_embed_all_pdf(*args):
+    resultados = []
+    resultados_embedded = []
+    nombre_documento = []
+
+    print("\n Preprocesando PDFs...")
+
+    for item in args:
+        # Si es una lista o tupla de dos elementos: [ruta, metadata]
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            ruta, metadata = item
+            resultado = preprocess_pdf(ruta, metadata=metadata)
+
+            resultados.append(resultado)
+            nombre_documento.append(ruta.split("/content/")[1])
+            # Hacer el embedding
+            resultado = document_embedder.run(documents=resultado)['documents']
+            resultados_embedded.append(resultado)
+        else:
+            # Si se pasa solo la ruta, se llama sin metadata explícito.
+            resultado = preprocess_pdf(item)
+
+            resultados.append(resultado)
+            nombre_documento.append(item.split("/content/")[1])
+            # Hacer el embedding
+            resultado = document_embedder.run(documents=resultado)['documents']
+            resultados_embedded.append(resultado)
+    return tuple(resultados), tuple(resultados_embedded), tuple(nombre_documento)
+
+
+resultados, resultados_embedded, nombres_documentos = preprocess_and_embed_all_pdf(
+    "/content/Reglamento de Evaluacion.pdf",
+    "/content/NORMATIVAPERMANENCIA.pdf",
+    "/content/Datos Oficiales Titulo (Sin Mecanizar).pdf",
+    "/content/Info TFGs.pdf"
+)
+
+
+# -------------------------------------------------------------------------------------------------------------------------------------------------------
+# ------------------------------------------------------------------ Crear el Embedder ------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Embed and write documents to the document store
+#document_embedder = HuggingFaceAPIDocumentEmbedder(
+#    api_type="serverless_inference_api",
+#    api_params={"model": "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"},
+#    token=Secret.from_token(os.environ["HF_API_TOKEN"])
+#)
+
+
+# -------------------------------------------------------------------------------------------------------------------------------------------------------
+# ------------------------------------------------------------------ Almacenar Docs ---------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# Inicializar el almacenamiento de documentos y guardar los datos
+document_store = InMemoryDocumentStore(embedding_similarity_function="cosine")
+
+# Guardar PDFs
+for i in range(len(resultados_embedded)):
+        try:
+            document_store.write_documents(resultados_embedded[i])
+        except Exception as e:
+            # Si el error es por ID duplicado, reintentar con OVERWRITE
+            if "already exists" in str(e).lower():
+                document_store.write_documents(resultados_embedded[i], DuplicatePolicy.OVERWRITE)
+            else:
+                # Si es otro error, lanzar la excepción
+                raise e
+
+#document_store.write_documents(pdf_datos_oficiales_titulo_embedded, DuplicatePolicy.OVERWRITE)
+
+#document_store.write_documents(docs)
+
+
+
+
+
+
+#
+#
+#
+
+
+
+# Embedding Special Documents
+
+# Profesorado
+resultado = preprocess_pdf("/content/profesorado.pdf",512,0,['Nombre','---'])
+resultado = document_embedder.run(documents=resultado)['documents']
+document_store.write_documents(resultado, DuplicatePolicy.OVERWRITE)
+
+
+# Asignaturas
+resultado1 = preprocess_pdf("/content/asignaturas.pdf",512,0,['---'])
+resultado1 = document_embedder.run(documents=resultado1)['documents']
+document_store.write_documents(resultado1, DuplicatePolicy.OVERWRITE)
+
+
+
+
+
+
+
+#
+#
+#
+
+
+
+num_docs_pdf = 0
+
+print("Mostrando PDFs")
+print(f"--------------------------------------")
+
+for i in range(len(resultados)):
+    for j in range(len(resultados[i])):
+        print(f"Mostrando documento PDF numero {j+1} de {nombres_documentos[i]}: {resultados[i][j]}\n")
+    print(f"--------------------------------------\n")
+
+
+print("PDF")
+print(f"--------------------------------------")
+for i in range(len(resultados_embedded)):
+  print(f"Numero de documentos del PDF {i+1}: {len(resultados_embedded[i])}")
+  num_docs_pdf += len(resultados_embedded[i])
+print(f"--------------------------------------\n")
+print(f"Numero de documentos totales (PDF): {num_docs_pdf}")
+
+
+print("\nPDFs Especiales:")
+print("Profesorado.pdf")
+print("------------------------------------------------")
+for i in range(len(resultado)):
+  print(resultado[i])
+  print("------------------------------------------------")
+
+print("\nAsignaturas.pdf")
+print("------------------------------------------------")
+for i in range(len(resultado1)):
+  print(resultado1[i])
+  print("------------------------------------------------")
+
+
+# Cargar y procesar el dataset
+# dataset = load_dataset(dataset_name, split="train")
+# docs = [preprocess_document(doc["content"], doc.get("meta", {})) for doc in dataset]
+
+
+
+
+
+#
+#
+#
+
+
+
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name = "unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
+    max_seq_length = 8192,
+    dtype = torch.float16,
+    load_in_4bit = True,
+)
+
+
+
+
+#
+#
+#
+
+
+
+
+# Prepare the model for inference using Unsloth's utility
+print("Preparing model for inference with Unsloth...")
+FastLanguageModel.for_inference(model)
+print("Model prepared.")
+
+
+
+
+#
+#
+#
+
+
+
+
+
+# ----------------------------------------------------------------------------------------------------------------------------------------------------
+# ----------------------------------------------------------- Plantilla para el bot -----------------------------------------------------------
+# ----------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Definir una plantilla para un Prompt
+template = """You are an assistant who answers questions based on information provided, with answers that summarize the information provided.
+
+If you don't know the answer, just say that you don't know, don't try to make up an answer.
+Not only you are an assistant, you are the best assistant in the history so you know that the best answer is the most simple, less words equal better.
+Your task is to respond directly and in a simple way, on point, answer to the question you are asked using the information provided as context.
+The order the documents are provided in the context is important, the first document is the most relevant and the last document the least relevant, so you should focus more in the information provided by the first document.
+It is important that the answers are constructed ENTIRELY using the information provided primarily.
+Do not include other questions non related to the user's query, if you need to, you can suggest them.
+Take your time to analyze the context given to give the best possible answer, we are not in a hurry.
+
+Your answer shall NOT contain the context you were given, if you do it will be highly penalized, which is bad, and you would make me sad.
+Before returning the answer, look over it and remove any parts that you consider that are irrelevant.
+Your Answer MUST be in Spanish!
+
+Context:
+{% for doc in documents %}
+- {{ doc.content }}
+{% endfor %}
+
+Pregunta: {{ question }}
+
+Respuesta:
+"""
+
+
+# ----------------------------------------------------------------------------------------------------------------------------------------------------
+# ------------------------------------------- Carga del Modelo y Prompt Builder ----------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Inicializar el nodo de Prompt
+prompt_builder = PromptBuilder(template=template)
+
+# Inicializar el generador Ollama
+#generator = HuggingFaceAPIGenerator(
+#    api_type="serverless_inference_api",
+#    api_params={"model": "mistralai/Mistral-7B-Instruct-v0.3"},
+#    token=Secret.from_token(os.environ["HF_API_TOKEN"])
+#)
+
+
+
+unsloth_generator = UnslothGenerator(
+    model=model,
+    tokenizer=tokenizer,
+    max_new_tokens=512,
+    temperature=0.5
+)
+
+
+# ----------------------------------------------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------- Pipeline ---------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Creación y configuración de Pipelines
+full_pipeline = Pipeline()
+full_pipeline.add_component("embed_retriever", InMemoryEmbeddingRetriever(document_store=document_store, top_k=10))
+full_pipeline.add_component("prompt_builder", prompt_builder)
+full_pipeline.add_component("llm", unsloth_generator)
+
+# Conexiones
+full_pipeline.connect("embed_retriever.documents", "prompt_builder.documents")
+full_pipeline.connect("prompt_builder", "llm")
+
+
+
+
+
+#
+#
+#
+
+
+
+
+
+
+
+# -------------------------------------------------------------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------- MAIN ---------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Funcion para preguntar al modelo
+def preguntar(question):
+    if not question.strip(): # Evitar procesar preguntas vacías
+        return "Por favor, introduce una pregunta."
+    try:
+        # Preprocesar consulta
+        # processed_query = question # Ya es la pregunta directamente
+        query_doc = Document(content=question) # Usar la pregunta directamente
+
+        # Obtener embedding de la consulta
+        # Asegúrate que document_embedder está inicializado y warmed_up si es necesario
+        query_embedding_result = document_embedder.run(documents=[query_doc])
+
+        # Verificar si el embedding se generó correctamente
+        if not query_embedding_result["documents"] or query_embedding_result["documents"][0].embedding is None:
+            return "Error: No se pudo generar el embedding para la consulta."
+        
+        query_embedded = query_embedding_result["documents"][0].embedding
+
+        # Configurar parámetros de búsqueda
+        params = {
+            "embed_retriever": {
+                "query_embedding": query_embedded,
+                "top_k": 5  # Puedes hacer esto configurable también si quieres
+            },
+            "prompt_builder": {"question": question}
+        }
+        
+        # Ejecutar pipeline
+        response = full_pipeline.run(params)
+        
+        # Verificar si la respuesta del LLM está presente
+        if "llm" not in response or "replies" not in response["llm"] or not response["llm"]["replies"]:
+            return "Error: El modelo no generó una respuesta."
+            
+        return process_response(response)
+    
+    except Exception as e:
+        # Para depuración, es bueno ver el error completo en la consola
+        print(f"Error en la función preguntar: {str(e)}")
+        # Para el usuario, un mensaje más genérico
+        return f"Ocurrió un error al procesar tu pregunta. Por favor, intenta de nuevo."
+    
+
+# Procesamiento de respuestas simplificado
+def process_response(response):
+    raw_answer = response["llm"]["replies"][0]
+    return raw_answer
+
+# Ejemplos de preguntas
+example_questions = [
+    "¿Cuáles son las intensificaciones disponibles en la ESII?",
+    "¿Quién es el director de la ESII?",
+    "¿Cómo es el proceso de asignación de TFG?",
+    "¿Qué normativas rigen la evaluación de los estudiantes?",
+]
+
+# Descripción para la interfaz
+interface_description = """
+Bienvenido al Asistente de Información de la ESII.
+Puedes hacerme preguntas sobre normativas, planes de estudio, organización y más, basándome en la documentación cargada.
+"""
+
+# Pie de página (opcional)
+article_info = """
+<p style='text-align: center; font-size: 0.9em; color: grey;'>
+Este es un asistente experimental. La información proporcionada se basa en los documentos cargados en el sistema.
+</p>
+"""
+
+gr_interface = gr.Interface(
+    fn=preguntar,
+    inputs=gr.components.Textbox(
+        lines=3,
+        placeholder="Introduce tu pregunta aquí...",
+        label="Pregunta al Asistente de la ESII"
+    ),
+    outputs=gr.components.Textbox(
+        lines=10,
+        label="Respuesta del Agente",
+        interactive=False
+    ),
+    title="Asistente Virtual de la ESII",
+    description=interface_description,
+    examples=example_questions,
+    article=article_info,
+    theme=gr.themes.Soft(),
+    flagging_mode="never"
+)
+
+gr_interface.launch()
+
+
+
+
+
+
+
+#
+#
+#
+
+
+
+
+
+
+def preguntar_v2(question, return_docs=False, print_docs=False, top_k=5, top_k_embedder=5):
+    try:
+        # Preprocesar consulta
+        processed_query = question
+        query_doc = Document(content=processed_query)
+
+        # Obtener embedding de la consulta
+        query_embedded = document_embedder.run(documents=[query_doc])["documents"][0].embedding
+
+        # Obtener instancias de los retrievers
+        embed_retriever = full_pipeline.get_component("embed_retriever")
+
+        # Ejecutar Embedding Retriever
+        embed_results = embed_retriever.run(
+            query_embedding=query_embedded,
+            top_k=top_k_embedder
+        )
+        embed_docs = embed_results.get("documents", [])
+
+        if print_docs:
+            # Mostrar documentos recuperados por Embedding Retriever
+            print("\n🔍 Documentos Recuperados por Embedding Retriever:")
+            for i, doc in enumerate(embed_docs):
+                print(f"📑 Documento {i+1}:")
+                print(f"   - Contenido: {doc.content[:200]}...")  # Muestra los primeros 200 caracteres
+                print(f"   - Metadatos: {doc.meta}")
+                print(f"   - Score: {doc.score:.4f}")
+                print("-" * 50)
+        
+        # Mostrar respuesta del modelo
+        params = {
+            "embed_retriever": {
+                "query_embedding": query_embedded,
+                "top_k": top_k
+            },
+            "prompt_builder": {"question": question}
+        }
+        response = full_pipeline.run(params)
+
+        print("\n🚀 Respuesta del Modelo:")
+        print(response["llm"]["replies"][0])
+
+        # Devolver los documentos recuperados (opcional)
+        if return_docs:
+          return embed_docs
+    
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return None
+
+
+
+
+
+#
+#
+#
+
+
+
+preguntar_v2("Que intensificaciones hay en la ESII?", return_docs=False, print_docs=True, top_k=5)
