@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Texto a PDF Formateado</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+            background-color: #f4f4f4;
+            color: #333;
+        }
+        .container {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        textarea {
+            width: 98%;
+            height: 300px;
+            margin-bottom: 15px;
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        h1 {
+            text-align: center;
+            color: #007bff;
+        }
+        .instructions {
+            margin-bottom: 15px;
+            padding: 10px;
+            background-color: #e9ecef;
+            border-left: 4px solid #007bff;
+            font-size: 0.9em;
+        }
+        .instructions strong {
+            color: #0056b3;
+        }
+    </style>
+    <!-- Incluir jsPDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Convertidor de Texto Formateado a PDF</h1>
+
+        <div class="instructions">
+            <p>Pega tu texto formateado en el área de abajo. El script intentará aplicar estilos básicos:</p>
+            <ul>
+                <li>Líneas que empiezan con <strong>#</strong> (espacio) serán Título 1.</li>
+                <li>Líneas que empiezan con <strong>##</strong> (espacio) serán Título 2.</li>
+                <li>Líneas que empiezan con <strong>###</strong> (espacio) serán Título 3.</li>
+                <li>Texto entre <strong>**dos asteriscos**</strong> será <strong>negrita</strong>.</li>
+                <li>Líneas que empiezan con <strong>*</strong> (espacio) o <strong>-</strong> (espacio) serán elementos de lista.</li>
+            </ul>
+            <p><strong>Nota:</strong> El formato es básico. Para PDFs complejos, usa un procesador de texto.</p>
+        </div>
+
+        <textarea id="inputText" placeholder="Pega aquí tu texto formateado..."></textarea>
+        <button onclick="generatePdf()">Generar PDF</button>
+    </div>
+
+    <script>
+        // Importar jsPDF (asegúrate de que el script de arriba se cargue primero)
+        const { jsPDF } = window.jspdf;
+
+        function generatePdf() {
+            const text = document.getElementById('inputText').value;
+            if (!text.trim()) {
+                alert("Por favor, pega algo de texto.");
+                return;
+            }
+
+            const doc = new jsPDF({
+                orientation: 'p', // portrait
+                unit: 'mm',       // millimeters
+                format: 'a4'      // A4
+            });
+
+            const lines = text.split('\n');
+            let yPosition = 20; // Posición Y inicial en mm
+            const pageHeight = doc.internal.pageSize.getHeight() - 20; // Margen inferior
+            const lineHeight = 7; // Altura de línea estimada en mm para texto normal
+            const indentSize = 5; // Indentación para listas en mm
+
+            doc.setFontSize(12);
+            doc.setFont("helvetica", "normal"); // Fuente por defecto
+
+            function addPageIfNeeded() {
+                if (yPosition > pageHeight) {
+                    doc.addPage();
+                    yPosition = 20; // Resetear Y para la nueva página
+                }
+            }
+
+            lines.forEach(line => {
+                addPageIfNeeded();
+                let processedLine = line;
+
+                if (line.startsWith('### ')) { // Título 3
+                    doc.setFontSize(14);
+                    doc.setFont("helvetica", "bold");
+                    processedLine = line.substring(4);
+                    doc.text(processedLine, 15, yPosition);
+                    doc.setFontSize(12); // Reset
+                    doc.setFont("helvetica", "normal"); // Reset
+                } else if (line.startsWith('## ')) { // Título 2
+                    doc.setFontSize(16);
+                    doc.setFont("helvetica", "bold");
+                    processedLine = line.substring(3);
+                    doc.text(processedLine, 15, yPosition);
+                    doc.setFontSize(12);
+                    doc.setFont("helvetica", "normal");
+                } else if (line.startsWith('# ')) { // Título 1
+                    doc.setFontSize(18);
+                    doc.setFont("helvetica", "bold");
+                    processedLine = line.substring(2);
+                    doc.text(processedLine, 15, yPosition);
+                    doc.setFontSize(12);
+                    doc.setFont("helvetica", "normal");
+                } else if (line.startsWith('* ') || line.startsWith('- ')) { // Elemento de lista
+                    processedLine = "• " + line.substring(2); // Usar viñeta •
+                    // Para aplicar negritas dentro de la lista
+                    const parts = [];
+                    let lastIndex = 0;
+                    const boldRegex = /\*\*(.*?)\*\*/g;
+                    let match;
+                    while ((match = boldRegex.exec(processedLine)) !== null) {
+                        if (match.index > lastIndex) {
+                            parts.push({ text: processedLine.substring(lastIndex, match.index), bold: false });
+                        }
+                        parts.push({ text: match[1], bold: true });
+                        lastIndex = match.index + match[0].length;
+                    }
+                    if (lastIndex < processedLine.length) {
+                        parts.push({ text: processedLine.substring(lastIndex), bold: false });
+                    }
+
+                    let currentX = 15 + indentSize;
+                    parts.forEach(part => {
+                        doc.setFont("helvetica", part.bold ? "bold" : "normal");
+                        doc.text(part.text, currentX, yPosition);
+                        currentX += doc.getStringUnitWidth(part.text) * doc.internal.getFontSize() / doc.internal.scaleFactor;
+                    });
+                    doc.setFont("helvetica", "normal"); // Reset
+
+                } else { // Texto normal con posible negrita
+                    const parts = [];
+                    let lastIndex = 0;
+                    const boldRegex = /\*\*(.*?)\*\*/g;
+                    let match;
+
+                    // Reemplazar múltiples espacios con uno solo para evitar problemas de renderizado de jsPDF
+                    processedLine = line.replace(/\s\s+/g, ' ');
+
+                    while ((match = boldRegex.exec(processedLine)) !== null) {
+                        if (match.index > lastIndex) {
+                            parts.push({ text: processedLine.substring(lastIndex, match.index), bold: false });
+                        }
+                        parts.push({ text: match[1], bold: true });
+                        lastIndex = match.index + match[0].length;
+                    }
+                    if (lastIndex < processedLine.length) {
+                        parts.push({ text: processedLine.substring(lastIndex), bold: false });
+                    }
+                    
+                    let currentX = 15;
+                    if (parts.length > 0) {
+                        parts.forEach(part => {
+                             // Dividir texto largo que podría exceder el ancho de la página
+                            const splitText = doc.splitTextToSize(part.text, doc.internal.pageSize.getWidth() - currentX - 15); // 15 de margen derecho
+                            splitText.forEach((textSegment, index) => {
+                                if (index > 0) { // Si es un segmento de una línea dividida
+                                    yPosition += lineHeight;
+                                    addPageIfNeeded();
+                                    currentX = 15 + (line.startsWith(' ') ? indentSize : 0); // Indentar si la línea original empezaba con espacios (aproximación)
+                                }
+                                doc.setFont("helvetica", part.bold ? "bold" : "normal");
+                                doc.text(textSegment, currentX, yPosition);
+                                if (splitText.length === 1) { // Si no se dividió, mover X
+                                     currentX += doc.getStringUnitWidth(textSegment) * doc.internal.getFontSize() / doc.internal.scaleFactor;
+                                } else { // Si se dividió, la siguiente parte de la misma "part" original irá en nueva línea
+                                     currentX = doc.internal.pageSize.getWidth(); // Forzar salto de línea para la siguiente "part" si hay
+                                }
+                            });
+                        });
+                    } else { // Línea vacía o sin formato especial
+                        doc.text(processedLine, currentX, yPosition); // Se mantiene para líneas vacías para preservar espaciado
+                    }
+                    doc.setFont("helvetica", "normal");
+                }
+                yPosition += lineHeight;
+            });
+
+            doc.save('documento_formateado.pdf');
+        }
+    </script>
+</body>
+</html>
