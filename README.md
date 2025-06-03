@@ -23,12 +23,12 @@ Este código ha sido diseñado para su ejecución en **Google Colab**, e incluye
 ## Estructura del repositorio
 
 Sistema-RAG-ESIICHAT--TFG/
-├── colab_notebook.ipynb # Notebook principal con todo el sistema RAG
-├── docs/ # Documentos usados (PDF y JSON)
-├── web_app/ # Prototipo HTML/CSS/JS para testeo
-├── utils/ # Funciones auxiliares para procesamiento
-├── README.md # Este archivo
-├── LICENSE # Licencia del proyecto
+    colab_notebook.ipynb # Notebook principal con todo el sistema RAG
+    docs/ # Documentos usados (PDF y JSON)
+    web_app/ # Prototipo HTML/CSS/JS para testeo
+    utils/ # Funciones auxiliares para procesamiento
+    README.md # Este archivo
+    LICENSE # Licencia del proyecto
 
 markdown
 Copiar
